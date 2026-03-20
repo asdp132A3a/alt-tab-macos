@@ -413,6 +413,8 @@ class ControlsTab {
         table.addRow(TableGroupView.Row(leftTitle: NSLocalizedString("Show hidden windows", comment: ""), rightViews: [showHiddenWindows]))
         table.addRow(TableGroupView.Row(leftTitle: NSLocalizedString("Show fullscreen windows", comment: ""), rightViews: [showFullscreenWindows]))
         table.addRow(TableGroupView.Row(leftTitle: NSLocalizedString("Show apps with no open window", comment: ""), rightViews: [showWindowlessApps]))
+        let showQuickLookWindows = LabelAndControl.makeCheckbox("showQuickLookWindows")
+        table.addRow(TableGroupView.Row(leftTitle: NSLocalizedString("Show Quick Look windows", comment: ""), rightViews: [showQuickLookWindows]))
         table.addRow(TableGroupView.Row(leftTitle: NSLocalizedString("Order windows by", comment: ""), rightViews: [windowOrder]))
         return table
     }

@@ -15,11 +15,11 @@
 	<key>CFBundleIconFile</key>
 	<string>app.icns</string>
 	<key>CFBundleIdentifier</key>
-	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<string>com.lwouis.alt-tab-macos.ql-fork</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>$(PRODUCT_NAME)</string>
+	<string>AltTab-QL</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -43,11 +43,11 @@
 	<key>NSSupportsSuddenTermination</key>
 	<string>false</string>
 	<key>SUEnableAutomaticChecks</key>
-	<string>true</string>
+	<string>false</string>
 	<key>SUEnableJavaScript</key>
 	<string>true</string>
 	<key>SUFeedURL</key>
-	<string>https://alt-tab.app/appcast.xml</string>
+	<string></string>
 	<key>SUPublicEDKey</key>
 	<string>2e9SQOBoaKElchSa/4QDli/nvYkyuDNfynfzBF6vJK4=</string>
 	<key>SUScheduledCheckInterval</key>

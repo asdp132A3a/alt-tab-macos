@@ -22,6 +22,7 @@ class Preferences {
             "mouseHoverEnabled": "false",
             "cursorFollowFocus": CursorFollowFocus.never.indexAsString,
             "showTabsAsWindows": "false",
+            "showQuickLookWindows": "true",
             "hideColoredCircles": "false",
             "windowDisplayDelay": "100",
             "appearanceStyle": AppearanceStylePreference.thumbnails.indexAsString,
@@ -105,6 +106,7 @@ class Preferences {
     static var cursorFollowFocus: CursorFollowFocus { CachedUserDefaults.macroPref("cursorFollowFocus", CursorFollowFocus.allCases) }
     static var trackpadHapticFeedbackEnabled: Bool { CachedUserDefaults.bool("trackpadHapticFeedbackEnabled") }
     static var showTabsAsWindows: Bool { CachedUserDefaults.bool("showTabsAsWindows") }
+    static var showQuickLookWindows: Bool { CachedUserDefaults.bool("showQuickLookWindows") }
     static var hideColoredCircles: Bool { CachedUserDefaults.bool("hideColoredCircles") }
     static var windowDisplayDelay: DispatchTimeInterval { DispatchTimeInterval.milliseconds(CachedUserDefaults.int("windowDisplayDelay")) }
     static var fadeOutAnimation: Bool { CachedUserDefaults.bool("fadeOutAnimation") }

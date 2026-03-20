@@ -19,7 +19,8 @@ class WindowDiscriminator {
         }
         let specialApp = books(app) || keynote(app) || preview(app, subrole) || iina(app) ||
             openFlStudio(app, title) || crossoverWindow(app, role, subrole, level) ||
-            isAlwaysOnTopScrcpy(app, level, role, subrole)
+            isAlwaysOnTopScrcpy(app, level, role, subrole) ||
+            (Preferences.showQuickLookWindows && finderQuickLook(app, subrole))
         let standardSubrole = [kAXStandardWindowSubrole, kAXDialogSubrole].contains(subrole)
         let appSpecificSubrole = openBoard(app) || adobeAudition(app, subrole) || adobeAfterEffects(app, subrole) ||
             steam(app, title, role) || worldOfWarcraft(app, role) || battleNetBootstrapper(app, role) ||
@@ -169,5 +170,10 @@ class WindowDiscriminator {
     private static func autocad(_ app: Application, _ subrole: String?) -> Bool {
         // AutoCAD uses the undocumented "AXDocumentWindow" subrole
         return (app.bundleIdentifier?.hasPrefix("com.autodesk.AutoCAD") ?? false) && subrole == kAXDocumentWindowSubrole
+    }
+
+    private static func finderQuickLook(_ app: Application, _ subrole: String?) -> Bool {
+        // Finder's Quick Look panel has a unique subrole "Quick Look"
+        return app.bundleIdentifier == "com.apple.finder" && subrole == "Quick Look"
     }
 }
