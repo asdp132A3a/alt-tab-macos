@@ -314,6 +314,11 @@ class App: AppCenterApplication {
                 forceDoNothingOnRelease = true
             }
             if !Windows.updatesBeforeShowing() { hideUi(); return }
+            // QL fork (PLAN-020 B1(a), FND-029): kick a forced (un-throttled, strand-immune) discovery
+            // resweep on the deliberate user summon. It runs async, so the panel still shows the cached
+            // list immediately (Phase 1); any re-discovered window lands via refreshOpenUiAfterExternalEvent
+            // and repaints THIS summon, instead of being delayed ≥1 summon by the +250ms TilesPanel timer.
+            Applications.manuallyRefreshAllWindows(forceImmediate: true)
             Windows.setInitialSelectedAndHoveredWindowIndex()
             if Preferences.windowDisplayDelay == DispatchTimeInterval.milliseconds(0) {
                 buildUiAndShowPanel()
@@ -376,6 +381,7 @@ class App: AppCenterApplication {
         Spaces.refresh()
         Screens.refresh()
         SpacesEvents.observe()
+        ApplicationActivationEvents.observe() // QL fork (PLAN-020 B1(b), FND-029): event-driven discovery resweep on app activation
         ScreensEvents.observe()
         SystemAppearanceEvents.observe()
         SystemScrollerStyleEvents.observe()

@@ -31,6 +31,16 @@ class Window {
     var size: CGSize?
     var spaceIds = [CGSSpaceID.max]
     var spaceIndexes = [SpaceIndex.max]
+    // QL fork: Quick Look windows report being on ALL user spaces via CGSCopySpacesForWindows.
+    // To keep them where they were opened (instead of following the user across spaces), we pin
+    // their spaceIds at creation time and stop updating them in updateSpaces().
+    var isQuickLookWindow = false
+    private var hasPinnedQuickLookSpace = false
+    // F14 v2 (PLAN-019): Spaces.refreshGeneration value at the last successful CGS
+    // read for this window. The preserve branch in updateSpaces() only fires when
+    // this matches the current refreshGeneration — closes Gap A by letting
+    // visibleSpaces-fallback heal stale spaceIds across refresh boundaries.
+    private var lastCGSSuccessGeneration: Int = -1
     var screenId: ScreenUuid?
     var axUiElement: AXUIElement?
     var application: Application
@@ -271,13 +281,81 @@ class Window {
     private func updateSpaces() {
         guard let cgWindowId else { return }
         var spaceIds = cgWindowId.spaces()
+        let cgsReturnedNonEmpty = !spaceIds.isEmpty
         // inactive tabs return no space from CGSCopySpacesForWindows; use the active tab sibling's space
         if spaceIds.isEmpty, let activeTab = TabGroup.activeTabSibling(of: self) {
             spaceIds = activeTab.spaceIds
         }
+        // F14 v2 Gap B (PLAN-019): CGS can return a STALE non-empty value during a space
+        // transition (upstream #689/#1254/#3792 — acknowledged macOS WindowServer behavior,
+        // ~300-600ms window). If CGS returned non-empty but its spaceIds don't intersect
+        // visibleSpaces AND a space change just happened AND CG considers the window
+        // on-screen, CGS is lying — trust on-screen-ness and fall back to currentSpaceId.
+        // Must run BEFORE the empty-handler so the synthesized value isn't treated as empty.
+        if !spaceIds.isEmpty
+            && !Spaces.visibleSpaces.contains(where: { vs in spaceIds.contains(vs) })
+            && Window.recentSpaceChangeWithinMs(500)
+            && Window.windowIsOnScreenViaCG(cgWindowId) {
+            spaceIds = [Spaces.currentSpaceId]
+        }
+        // Fallback for apps without AXTabGroup (e.g. Safari uses HTML tabs, not native AXTabGroup)
+        // when CGSCopySpacesForWindows transiently returns empty. Without this, the window's
+        // spaceIds remains [] and Windows.refreshIfWindowShouldBeShownToTheUser drops it at the
+        // visible-spaces filter, causing intermittent missing-from-switcher symptom.
+        if spaceIds.isEmpty {
+            // F14 v2 Gap A (PLAN-019): preserve self.spaceIds only if it was recorded in
+            // the current Spaces.refreshGeneration. Across refresh boundaries (e.g. the
+            // user moved the window between spaces via Mission Control with no AX event),
+            // open the preserve gate so visibleSpaces-fallback can heal stale state.
+            if lastCGSSuccessGeneration == Spaces.refreshGeneration
+                && !self.spaceIds.isEmpty
+                && self.spaceIds != [CGSSpaceID.max] {
+                return
+            }
+            // First-ever update (sentinel still present) OR new refresh generation:
+            // fall back to currently visible spaces so the window isn't dropped from the switcher.
+            spaceIds = Spaces.visibleSpaces
+        }
+        // QL fork: Quick Look windows are reported on all user spaces by CGS. Pin them to the
+        // space they were opened on at first observation; after that, never overwrite.
+        if isQuickLookWindow {
+            if hasPinnedQuickLookSpace {
+                // Already pinned: keep existing spaceIds untouched on subsequent updates.
+                return
+            }
+            spaceIds = [Spaces.currentSpaceId]
+            hasPinnedQuickLookSpace = true
+        }
+        // Tag this write with the current refresh generation when CGS returned real data —
+        // lets Gap A distinguish "still valid in same generation" from "stale, generation
+        // advanced." Synthetic writes (tiebreaker / fallback / QL pin) don't update the tag.
+        if cgsReturnedNonEmpty {
+            lastCGSSuccessGeneration = Spaces.refreshGeneration
+        }
         self.spaceIds = spaceIds
         self.spaceIndexes = spaceIds.compactMap { spaceId in Spaces.idsAndIndexes.first { $0.0 == spaceId }?.1 }
         self.isOnAllSpaces = spaceIds.count > 1
+    }
+
+    // F14 v2 (PLAN-019): true if an activeSpaceDidChange notification fired within the
+    // last `ms` milliseconds. Used to gate the Gap B tiebreaker so the more-expensive
+    // CGWindowListCopyWindowInfo IPC only fires during a known transition window.
+    private static func recentSpaceChangeWithinMs(_ ms: Int) -> Bool {
+        guard let t = SpacesEvents.lastChangeAt else { return false }
+        return Date().timeIntervalSince(t) * 1000 < Double(ms)
+    }
+
+    // F14 v2 (PLAN-019): query CG's kCGWindowIsOnscreen for the given wid via
+    // CGWindowListCopyWindowInfo with the IncludingWindow filter. Used as a Gap B
+    // tiebreaker — if WindowServer says the window is on-screen but CGS claims it's
+    // on a non-visible space, CGS is the one lying. Returns false on any failure.
+    private static func windowIsOnScreenViaCG(_ wid: CGWindowID) -> Bool {
+        let options: CGWindowListOption = [.optionIncludingWindow, .excludeDesktopElements]
+        guard let descs = CGWindowListCopyWindowInfo(options, wid) as? [[String: Any]],
+              let onScreen = descs.first?[kCGWindowIsOnscreen as String] as? Bool else {
+            return false
+        }
+        return onScreen
     }
 
     private func updateScreenId() {

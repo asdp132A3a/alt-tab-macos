@@ -172,7 +172,7 @@ class WindowDiscriminator {
         return (app.bundleIdentifier?.hasPrefix("com.autodesk.AutoCAD") ?? false) && subrole == kAXDocumentWindowSubrole
     }
 
-    private static func finderQuickLook(_ app: Application, _ subrole: String?) -> Bool {
+    static func finderQuickLook(_ app: Application, _ subrole: String?) -> Bool {
         // Finder's Quick Look panel has a unique subrole "Quick Look"
         return app.bundleIdentifier == "com.apple.finder" && subrole == "Quick Look"
     }

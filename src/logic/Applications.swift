@@ -6,6 +6,10 @@ class Applications {
     static var frontmostPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
     // Layer 0: global throttle on manuallyRefreshAllWindows (panel show full-sync)
     static let manualRefreshThrottler = Throttler(delayInMs: 1000)
+    // QL fork (PLAN-020 B1(b), FND-029): dedicated throttle for the on-activation discovery resweep.
+    // Kept separate from manualRefreshThrottler so a rapid app-switch burst collapses to one sweep
+    // without also throttling the on-summon resweep (or vice-versa). See refreshWindowsForDiscovery().
+    static let discoveryRefreshThrottler = Throttler(delayInMs: 1000)
     // Layer 1 (AX IPC throttle + retry + concurrency) is handled by AXCallScheduler.shared
     // Layer 2: throttle mutations to Applications.list / Windows.list on main thread
     static let appListUpdateThrottler = ThrottlerWithKey(delayInMs: 200)
@@ -21,9 +25,34 @@ class Applications {
         addRunningApplications(NSWorkspace.shared.runningApplications, false)
     }
 
-    static func manuallyRefreshAllWindows() {
-        manualRefreshThrottler.throttleOrProceed {
+    /// QL fork (PLAN-020 B1(a), FND-029): `forceImmediate` is set for a DELIBERATE user-summon resweep.
+    /// When true we (1) bypass `manualRefreshThrottler` so a rapid re-summon can't skip the only discovery
+    /// pass (attacks D2), and (2) route discovery through a dedicated `resweep-pid-` scheduler key with the
+    /// pid cleared from `unresponsivePids` so a pid stuck mid-retry (up to the 60s give-up) can't strand the
+    /// resweep (attacks D3/D4). The enumeration is identical to launch; only the surrounding throttle/scheduler
+    /// state differs — which is exactly why a restart works but the throttled resweep sometimes doesn't.
+    static func manuallyRefreshAllWindows(forceImmediate: Bool = false) {
+        let work = {
             removeZombieWindows()
+            addMissingWindows(forceImmediate: forceImmediate)
+            reviewExistingWindows()
+        }
+        if forceImmediate {
+            work()
+        } else {
+            manualRefreshThrottler.throttleOrProceed(work)
+        }
+    }
+
+    /// QL fork (PLAN-020 B1(b), FND-029): purely-additive discovery resweep used by event triggers
+    /// (app activation). Runs only addMissingWindows() + reviewExistingWindows() and deliberately
+    /// SKIPS removeZombieWindows(): the eviction pass is single-shot (PLAN-016 unapplied) and firing it
+    /// on every activation would widen the eviction race for Rosetta/Qt apps (e.g. Epubor) without
+    /// adding any recovery. This is the closest safe restoration of the event-driven discovery that
+    /// the upstream c72fedbb regression (FND-028) removed, minus the eviction risk. Has its own
+    /// throttle so an app-switch burst collapses to one sweep + one tail.
+    static func refreshWindowsForDiscovery() {
+        discoveryRefreshThrottler.throttleOrProceed {
             addMissingWindows()
             reviewExistingWindows()
         }
@@ -34,14 +63,24 @@ class Applications {
     /// * we couldn't subscribe to the app before the window was created
     /// * weird cases like apps launching at startup with "restaure windows"
     /// this manually queries the system for windows, and keeps our list in-sync with the actual system
-    static func addMissingWindows() {
+    static func addMissingWindows(forceImmediate: Bool = false) {
         for app in list {
-            manuallyUpdateWindows(app)
+            manuallyUpdateWindows(app, forceImmediate: forceImmediate)
         }
     }
 
-    static func manuallyUpdateWindows(_ app: Application) {
-        AXCallScheduler.shared.schedule(key: "pid-\(app.pid)", context: app.debugId, pid: app.pid) { [weak app] in
+    /// QL fork (PLAN-020 B1(a), FND-029): when `forceImmediate`, clear the pid from `unresponsivePids`
+    /// (so it routes through fastQueue, not the slow retryQueue — attacks D4) and schedule under a
+    /// dedicated `resweep-pid-` key so the enumeration runs immediately on its own throttle clock instead
+    /// of coalescing into a `pid-` key that may be stuck `.executing`/`.retrying` for up to 60s (attacks D3).
+    /// The dedicated key may run concurrently with a live-event `pid-` enumeration for the same app; both
+    /// feed the idempotent `findOrCreate`, so the only cost is one extra (capped) AX pass.
+    static func manuallyUpdateWindows(_ app: Application, forceImmediate: Bool = false) {
+        if forceImmediate {
+            AXCallScheduler.shared.removeUnresponsivePid(app.pid)
+        }
+        let key = forceImmediate ? "resweep-pid-\(app.pid)" : "pid-\(app.pid)"
+        AXCallScheduler.shared.schedule(key: key, context: app.debugId, pid: app.pid) { [weak app] in
             guard let app, let axUiElement = app.axUiElement else { return }
             let axWindows = try axUiElement.allWindows(app.pid)
             guard !axWindows.isEmpty else {
@@ -70,7 +109,9 @@ class Applications {
             let level = wid.level()
             let isSelf = app.pid == ProcessInfo.processInfo.processIdentifier
             let keys = [kAXTitleAttribute, kAXSubroleAttribute, kAXRoleAttribute, kAXSizeAttribute, kAXPositionAttribute, kAXFullscreenAttribute, kAXMinimizedAttribute] + (isSelf ? [] : [kAXChildrenAttribute])
-            let a = try axWindow.attributes(keys)
+            // PLAN-014 (QL fork, FND-029): retry when subrole/size read nil on a non-throwing call (Qt/Rosetta
+            // transient) so isActualWindow doesn't silently reject a real window. See AXUIElement.attributesForDiscovery.
+            let a = try axWindow.attributesForDiscovery(keys)
             let tabSiblingTitles = isSelf ? nil : TabGroup.extractTabTitles(a.children)
             DispatchQueue.main.async { [weak app] in
                 guard let app else { return }
@@ -157,6 +198,9 @@ class Applications {
         for tApp in terminatingApps {
             let pid = tApp.processIdentifier
             AXCallScheduler.shared.removeEntry(key: "pid-\(pid)")
+            // QL fork (PLAN-020 B1(a), FND-029): also clear the dedicated forced-resweep key for this pid
+            // (added by manuallyUpdateWindows(forceImmediate:)) so it doesn't leak after the app quits.
+            AXCallScheduler.shared.removeEntry(key: "resweep-pid-\(pid)")
             AXCallScheduler.shared.removeUnresponsivePid(pid)
             appListUpdateThrottler.removeEntry(withKey: "\(pid)")
         }

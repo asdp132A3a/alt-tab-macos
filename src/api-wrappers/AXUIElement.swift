@@ -92,6 +92,38 @@ extension AXUIElement {
         return result
     }
 
+    // ---- PLAN-014 (QL fork, FND-029 / FND-016): retry-on-nil-subrole for discovery ---------------------
+    // SEPARATE, self-contained block — can be evaluated or dropped independently of the B1 resweep changes.
+    //
+    // Qt/PySide6 apps (e.g. Epubor Nook Converter, x86-64 under Rosetta) can transiently return a nil /
+    // .axError subrole (or size) for a REAL window on a NON-throwing AX call: AXUIElementCopyMultipleAttribute-
+    // Values succeeds, but castSafely maps the .axError placeholder to nil (see castSafely + the comment at
+    // its .axError case). isActualWindow then silently rejects the valid window (subrole gate) with no retry,
+    // which is the Qt half of the Epubor window-missing bug. For a KNOWN window candidate (the element already
+    // resolved to a valid cgWindowId in discovery), re-fetch a few times with short backoff when a CRITICAL
+    // attribute (subrole or size) is nil.
+    //
+    // A `.cannotComplete` throw is explicitly NOT this case: we let it propagate so AXCallScheduler's existing
+    // backoff/give-up handles a genuinely unresponsive app. Runs only inside AXCallScheduler operation-queue
+    // blocks (never the main thread), so the bounded Thread.sleep blocks a worker, not the UI — consistent with
+    // the existing model where each attributes() call may already block up to the 1s global AX timeout.
+    private static let discoveryNilRetryCount = 3
+    private static let discoveryNilRetryBaseDelay = 0.02 // 20ms, 40ms, 60ms — ≤120ms worst case, nil-only
+    func attributesForDiscovery(_ keys: [String]) throws -> AXAttributes {
+        var a = try attributes(keys)
+        let needsSubrole = keys.contains(kAXSubroleAttribute)
+        let needsSize = keys.contains(kAXSizeAttribute)
+        var attempt = 0
+        while attempt < Self.discoveryNilRetryCount,
+              (needsSubrole && a.subrole == nil) || (needsSize && a.size == nil) {
+            attempt += 1
+            Thread.sleep(forTimeInterval: Self.discoveryNilRetryBaseDelay * Double(attempt))
+            a = try attributes(keys)
+        }
+        return a
+    }
+    // ---- end PLAN-014 ----------------------------------------------------------------------------------
+
     func castSafely<T>(_ value: CFTypeRef) -> T? {
         switch CFGetTypeID(value) {
         case AXValueGetTypeID():
