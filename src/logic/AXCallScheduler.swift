@@ -30,6 +30,7 @@ class AXCallScheduler {
         var pendingPid: pid_t?
         var pendingContext: String?
         var cancelRetries = false
+        var removalRequested = false
     }
 
     private init() {
@@ -97,9 +98,13 @@ class AXCallScheduler {
         // removal is legitimate (window actually destroyed), the block will hit a CGS/AX nil and
         // findOrCreate will reject without adding. Either outcome is safer than silent-drop.
         // See upstream lwouis/alt-tab-macos#5296 / #5420 / #5564 — this is the mechanism.
-        if let state = keyStates[key], state.phase == .throttled, state.pendingBlock != nil {
-            // Leave the entry in place. After fireThrottled runs, onComplete → drainPending
-            // transitions state back to .idle. Memory cost: at most ~200ms of stale state.
+        if var state = keyStates[key], state.phase == .throttled, state.pendingBlock != nil {
+            // Leave the entry so fireThrottled can still fire the pending re-add block (PLAN-018), but
+            // flag it for purge: once that block runs, drainPending removes the entry instead of leaving
+            // it .idle forever — otherwise a terminated pid/wid (wid- keys are monotonic, never reused)
+            // leaks its KeyState for the life of the process.
+            state.removalRequested = true
+            keyStates[key] = state
             lock.unlock()
             return
         }
@@ -221,9 +226,16 @@ class AXCallScheduler {
         lock.lock()
         guard var state = keyStates[key], let block = state.pendingBlock else {
             if var state = keyStates[key] {
-                state.cancelRetries = false
-                state.phase = .idle
-                keyStates[key] = state
+                if state.removalRequested {
+                    // PLAN-018 follow-up: a removeEntry() arrived while this key was throttled with a
+                    // pending block. We kept it so the pending re-add could fire; it has, and nothing is
+                    // queued — purge now so terminated pid/wid keys don't leak.
+                    keyStates[key] = nil
+                } else {
+                    state.cancelRetries = false
+                    state.phase = .idle
+                    keyStates[key] = state
+                }
             }
             lock.unlock()
             return

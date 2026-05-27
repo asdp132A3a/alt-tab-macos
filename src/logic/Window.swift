@@ -282,6 +282,7 @@ class Window {
         guard let cgWindowId else { return }
         var spaceIds = cgWindowId.spaces()
         let cgsReturnedNonEmpty = !spaceIds.isEmpty
+        var usedSyntheticValue = false
         // inactive tabs return no space from CGSCopySpacesForWindows; use the active tab sibling's space
         if spaceIds.isEmpty, let activeTab = TabGroup.activeTabSibling(of: self) {
             spaceIds = activeTab.spaceIds
@@ -297,6 +298,7 @@ class Window {
             && Window.recentSpaceChangeWithinMs(500)
             && Window.windowIsOnScreenViaCG(cgWindowId) {
             spaceIds = [Spaces.currentSpaceId]
+            usedSyntheticValue = true
         }
         // Fallback for apps without AXTabGroup (e.g. Safari uses HTML tabs, not native AXTabGroup)
         // when CGSCopySpacesForWindows transiently returns empty. Without this, the window's
@@ -312,9 +314,11 @@ class Window {
                 && self.spaceIds != [CGSSpaceID.max] {
                 return
             }
-            // First-ever update (sentinel still present) OR new refresh generation:
-            // fall back to currently visible spaces so the window isn't dropped from the switcher.
-            spaceIds = Spaces.visibleSpaces
+            // First-ever update (sentinel) or new generation: clamp to currentSpaceId so the window
+            // isn't dropped. [currentSpaceId] (not visibleSpaces) avoids a false isOnAllSpaces on
+            // multi-display, where visibleSpaces has >1 id and would mis-flag a single-space window.
+            spaceIds = [Spaces.currentSpaceId]
+            usedSyntheticValue = true
         }
         // QL fork: Quick Look windows are reported on all user spaces by CGS. Pin them to the
         // space they were opened on at first observation; after that, never overwrite.
@@ -325,11 +329,12 @@ class Window {
             }
             spaceIds = [Spaces.currentSpaceId]
             hasPinnedQuickLookSpace = true
+            usedSyntheticValue = true
         }
-        // Tag this write with the current refresh generation when CGS returned real data —
-        // lets Gap A distinguish "still valid in same generation" from "stale, generation
-        // advanced." Synthetic writes (tiebreaker / fallback / QL pin) don't update the tag.
-        if cgsReturnedNonEmpty {
+        // Tag this write with the refresh generation only for a real CGS read — lets Gap A tell
+        // "still valid in same generation" from "stale, generation advanced." Synthetic writes
+        // (tiebreaker / fallback / QL pin) set usedSyntheticValue and must not update the tag.
+        if cgsReturnedNonEmpty && !usedSyntheticValue {
             lastCGSSuccessGeneration = Spaces.refreshGeneration
         }
         self.spaceIds = spaceIds
@@ -345,17 +350,21 @@ class Window {
         return Date().timeIntervalSince(t) * 1000 < Double(ms)
     }
 
-    // F14 v2 (PLAN-019): query CG's kCGWindowIsOnscreen for the given wid via
-    // CGWindowListCopyWindowInfo with the IncludingWindow filter. Used as a Gap B
-    // tiebreaker — if WindowServer says the window is on-screen but CGS claims it's
-    // on a non-visible space, CGS is the one lying. Returns false on any failure.
+    // F14 v2 (PLAN-019): Gap B tiebreaker — true if WindowServer reports the wid on-screen (CGS then
+    // lying about a non-visible space). updateSpaces() runs on the main thread once per window per pass,
+    // so a per-wid IPC fanned out to N synchronous round-trips during a transition. Snapshot all
+    // on-screen wids in ONE IPC, memoized per (refreshGeneration, lastChangeAt): a summon pass shares
+    // one round-trip and a new space change re-snapshots.
+    private static var onScreenWidsCache = Set<CGWindowID>()
+    private static var onScreenWidsCacheGeneration = -1
+    private static var onScreenWidsCacheChangeAt: Date?
     private static func windowIsOnScreenViaCG(_ wid: CGWindowID) -> Bool {
-        let options: CGWindowListOption = [.optionIncludingWindow, .excludeDesktopElements]
-        guard let descs = CGWindowListCopyWindowInfo(options, wid) as? [[String: Any]],
-              let onScreen = descs.first?[kCGWindowIsOnscreen as String] as? Bool else {
-            return false
+        if onScreenWidsCacheGeneration != Spaces.refreshGeneration || onScreenWidsCacheChangeAt != SpacesEvents.lastChangeAt {
+            onScreenWidsCache = Set(CGWindow.windows(.optionOnScreenOnly).compactMap { $0.id() })
+            onScreenWidsCacheGeneration = Spaces.refreshGeneration
+            onScreenWidsCacheChangeAt = SpacesEvents.lastChangeAt
         }
-        return onScreen
+        return onScreenWidsCache.contains(wid)
     }
 
     private func updateScreenId() {

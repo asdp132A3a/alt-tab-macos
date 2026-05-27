@@ -51,6 +51,8 @@ class ApplicationActivationEvents {
     }
 
     @objc private static func handleEvent(_ notification: Notification) {
-        Applications.refreshWindowsForDiscovery()
+        guard let ra = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+              let app = (Applications.list.first { $0.pid == ra.processIdentifier }) else { return }
+        Applications.refreshWindowsForDiscovery(app)
     }
 }
