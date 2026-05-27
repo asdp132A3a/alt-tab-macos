@@ -90,6 +90,19 @@ class AXCallScheduler {
 
     func removeEntry(key: String) {
         lock.lock()
+        // QL fork (PLAN-018, FND-025): If a throttled re-add block is in flight for this key,
+        // wiping the state will cause fireThrottled to bail at line 112 (state == nil) and silently
+        // drop the pending block. That dropped block may be a re-add attempt for a window that
+        // removeZombieWindows just falsely evicted — letting it fire restores the window. If the
+        // removal is legitimate (window actually destroyed), the block will hit a CGS/AX nil and
+        // findOrCreate will reject without adding. Either outcome is safer than silent-drop.
+        // See upstream lwouis/alt-tab-macos#5296 / #5420 / #5564 — this is the mechanism.
+        if let state = keyStates[key], state.phase == .throttled, state.pendingBlock != nil {
+            // Leave the entry in place. After fireThrottled runs, onComplete → drainPending
+            // transitions state back to .idle. Memory cost: at most ~200ms of stale state.
+            lock.unlock()
+            return
+        }
         keyStates[key] = nil
         lock.unlock()
     }

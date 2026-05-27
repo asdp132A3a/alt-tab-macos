@@ -6,6 +6,12 @@ class Spaces {
     static var visibleSpaces = [CGSSpaceID]()
     static var screenSpacesMap = [ScreenUuid: [CGSSpaceID]]()
     static var idsAndIndexes = [(CGSSpaceID, SpaceIndex)]()
+    // F14 v2 (PLAN-019): monotonic counter incremented on each refresh().
+    // Window.updateSpaces() uses this as a generation tag so the preserve branch
+    // only honors self.spaceIds within the same generation. Closes Gap A —
+    // across a refresh boundary, preserve opens up and fallback-to-visibleSpaces
+    // can fire, healing windows that drifted to a destroyed/wrong space.
+    static var refreshGeneration: Int = 0
 
     static func isSingleSpace() -> Bool {
         return idsAndIndexes.count == 1
@@ -22,6 +28,7 @@ class Spaces {
     }
 
     static func refresh() {
+        refreshGeneration &+= 1
         refreshAllIdsAndIndexes()
         updateCurrentSpace()
     }

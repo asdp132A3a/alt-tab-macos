@@ -486,6 +486,12 @@ class Windows {
         }
         guard WindowDiscriminator.isActualWindow(app, wid, level, title, subrole, role, size) else { return (nil, false) }
         let window = Window(windowAxUiElement, app, wid, title, isFullscreen, isMinimized, position, size)
+        // QL fork: tag Quick Look windows so updateSpaces() pins them to the current space
+        // instead of letting CGS report them as being on all user spaces.
+        if WindowDiscriminator.finderQuickLook(app, subrole) {
+            window.isQuickLookWindow = true
+            window.updateSpacesAndScreen()
+        }
         appendWindow(window)
         return (window, true)
     }
