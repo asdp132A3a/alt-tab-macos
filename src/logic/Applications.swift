@@ -32,29 +32,31 @@ class Applications {
     /// resweep (attacks D3/D4). The enumeration is identical to launch; only the surrounding throttle/scheduler
     /// state differs — which is exactly why a restart works but the throttled resweep sometimes doesn't.
     static func manuallyRefreshAllWindows(forceImmediate: Bool = false) {
-        let work = {
-            removeZombieWindows()
-            addMissingWindows(forceImmediate: forceImmediate)
-            reviewExistingWindows()
-        }
         if forceImmediate {
-            work()
+            // B1(a) additive-only: skip removeZombieWindows() on the forced summon pass. The eviction
+            // pass is single-shot (PLAN-016 unapplied); running it un-throttled here, on top of the
+            // throttled tail from TilesPanel.windowDidBecomeKey, widens the false-eviction race for
+            // Rosetta/Qt apps (e.g. Epubor) without adding recovery. Matches refreshWindowsForDiscovery().
+            addMissingWindows(forceImmediate: true)
+            reviewExistingWindows()
         } else {
-            manualRefreshThrottler.throttleOrProceed(work)
+            manualRefreshThrottler.throttleOrProceed {
+                removeZombieWindows()
+                addMissingWindows()
+                reviewExistingWindows()
+            }
         }
     }
 
-    /// QL fork (PLAN-020 B1(b), FND-029): purely-additive discovery resweep used by event triggers
-    /// (app activation). Runs only addMissingWindows() + reviewExistingWindows() and deliberately
-    /// SKIPS removeZombieWindows(): the eviction pass is single-shot (PLAN-016 unapplied) and firing it
-    /// on every activation would widen the eviction race for Rosetta/Qt apps (e.g. Epubor) without
-    /// adding any recovery. This is the closest safe restoration of the event-driven discovery that
-    /// the upstream c72fedbb regression (FND-028) removed, minus the eviction risk. Has its own
-    /// throttle so an app-switch burst collapses to one sweep + one tail.
-    static func refreshWindowsForDiscovery() {
+    /// QL fork (PLAN-020 B1(b), FND-029): purely-additive discovery resweep on app activation, scoped to
+    /// the activated app only (its pid comes from the notification) — broad all-apps recovery stays on the
+    /// on-summon B1(a) pass, so the most frequent user action doesn't fan a system-wide AX sweep. Skips
+    /// removeZombieWindows() (single-shot eviction; would widen the Rosetta/Qt eviction race). Closest safe
+    /// restoration of the event-driven discovery the upstream c72fedbb regression (FND-028) removed. Its own
+    /// throttle collapses an app-switch burst to one sweep.
+    static func refreshWindowsForDiscovery(_ activatedApp: Application) {
         discoveryRefreshThrottler.throttleOrProceed {
-            addMissingWindows()
-            reviewExistingWindows()
+            manuallyUpdateWindows(activatedApp)
         }
     }
 
@@ -96,22 +98,24 @@ class Applications {
             }
             for axWindow in axWindows {
                 guard let wid = try? axWindow.cgWindowId(), wid != 0 else { continue }
-                updateWindowAttributes(axWindow, wid, app)
+                updateWindowAttributes(axWindow, wid, app, retryNilCriticalAttributes: true)
             }
         }
     }
 
     /// Unified window attribute fetch + main-thread update. Used by both manual sync and reviewExistingWindows.
-    static func updateWindowAttributes(_ axWindow: AXUIElement, _ wid: CGWindowID, _ app: Application) {
+    static func updateWindowAttributes(_ axWindow: AXUIElement, _ wid: CGWindowID, _ app: Application, retryNilCriticalAttributes: Bool = false) {
         AXCallScheduler.shared.schedule(key: "wid-\(wid)", context: app.debugId, pid: app.pid) { [weak app] in
             guard let app else { return }
             guard wid != 0 && wid != TilesPanel.shared.windowNumber else { return }
             let level = wid.level()
             let isSelf = app.pid == ProcessInfo.processInfo.processIdentifier
             let keys = [kAXTitleAttribute, kAXSubroleAttribute, kAXRoleAttribute, kAXSizeAttribute, kAXPositionAttribute, kAXFullscreenAttribute, kAXMinimizedAttribute] + (isSelf ? [] : [kAXChildrenAttribute])
-            // PLAN-014 (QL fork, FND-029): retry when subrole/size read nil on a non-throwing call (Qt/Rosetta
-            // transient) so isActualWindow doesn't silently reject a real window. See AXUIElement.attributesForDiscovery.
-            let a = try axWindow.attributesForDiscovery(keys)
+            // PLAN-014 (QL fork, FND-029): discovery path retries when subrole/size read nil on a non-throwing
+            // call (Qt/Rosetta transient) so isActualWindow doesn't silently reject a real window. The review
+            // path passes false — findOrCreate matches known windows before the subrole gate, so the retry
+            // can't help there and would only burn up to 120ms on a dead element.
+            let a = retryNilCriticalAttributes ? try axWindow.attributesForDiscovery(keys) : try axWindow.attributes(keys)
             let tabSiblingTitles = isSelf ? nil : TabGroup.extractTabTitles(a.children)
             DispatchQueue.main.async { [weak app] in
                 guard let app else { return }
